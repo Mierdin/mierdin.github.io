@@ -117,3 +117,38 @@ We start off by looking at [`st2actionrunner`](https://docs.stackstorm.com/refer
 
 As shown in the component diagram, `st2actionrunner` communicates with both RabbitMQ, as well as the database (which, at this time is MongoDB). RabbitMQ is used to deliver incoming execution requests to the scheduler, and also so the scheduler can forward scheduled executions to the dispatcher. Both of these subcomponents update the database with execution history and status.
 
+### st2api
+
+If you've worked with StackStorm at all (and hopefully if you're this far through this post, you have), you know that StackStorm has an API. External components, such as the CLI client, the Web UI, and chatops all use this API to interact with StackStorm. This API is also where 3rd party software can integrate with StackStorm (with the exception of packs, which usually have a tighter integration at the Python level, and don't need to use the API).
+
+`st2api`, like the aforementioned `st2actionrunner` runs as it's own separate process. To put it very loosely, `st2api` "translates" API calls into RabbitMQ messages or database calls. What's meant by this is that incoming API requests are usually aimed at either retrieving data, pushing new data, or executing some kind of action with StackStorm. All of these things are done on other running processes; for instance, `st2actionrunner` is responsible for actually executing a running action, and it receives those requests over RabbitMQ. So, `st2api` must initially receive such instructions via it's API, and forward that request along via RabbitMQ. Let's discuss how that actually works.
+
+> The upcoming 2.3 release changes a lot of the underlying infrastructure for the StackStorm API. The API itself isn't changing (still at v1) for this release, but the way that the API is described within `st2api`, and how incoming requests are routed to function calls has changed a bit. Everything we'll discuss in this section will reflect these changes.
+
+First, we should talk about the API itself. The API has been defined using an API domain-specific language known as Swagger, which was created to separate the API definitions from the actual implementation in a more-or-less standardized way. This means that any API written in Swagger can take advantage of tooling that can produce generated code, as well as automatic documentation from this definition.
+
+This Swagger definition is [located here](https://github.com/StackStorm/st2/blob/master/st2common/st2common/openapi.yaml). It plainly defines each API endpoint (like `/api/v1/actions`), what parameters are required by each, what they'll return in the form of a response, etc. While the actual implementation logic that works behind the scenes of each of these endpoints is not shown, it's easy to see at a high level what the API does.
+
+However, just because the implementation is separated from the definition of the API, this does not mean we can't dig into the implementation when we need to. You may notice the `operationId` key in the Swagger definition. This is the link between the language-agnostic API definition and the actual implementation of that API endpoint. In the case of `st2api`, the key `st2api.controllers.v1.actions:actions_controller.post` literally points to the `ActionsController.post()` function in [`actions.py`](https://github.com/StackStorm/st2/blob/master/st2api/st2api/controllers/v1/actions.py). So, even though the Swagger description is designed to omit any implementation details, it's trivial to find where this implementation is taking place.
+
+When you drill into the implementation, it becomes a little more obvious what's going on. Continuing to pick on the `post` implementation for `/api/v1/actions`, we can see that the primary goal of the function that sits behind this API endpoint is to receive an incoming action definition and write it to the database. Effectively, we're seeing what actually happens on the back-end when we add a new action with the StackStorm CLI:
+
+```
+vagrant@st2vagrant:/opt/stackstorm/packs/core/actions$ st2 --debug action create local.yaml
+2017-04-13 22:40:42,012  DEBUG - Using cached token from file "/home/vagrant/.st2/token-st2admin"
+# -------- begin 140451057640144 request ----------
+curl -X POST -H  'Connection: keep-alive' -H  'Accept-Encoding: gzip, deflate' -H  'Accept: */*' -H  'User-Agent: python-requests/2.11.1' -H  'content-type: application/json' -H  'X-Auth-Token: fffffffffffffffff' -H  'Content-Length: 337' --data-binary '{"description": "Action that executes an arbitrary Linux command on the localhost.", "parameters": {"cmd": {"required": true, "type": "string", "description": "Arbitrary Linux command to be executed on the local host."}, "sudo": {"immutable": true}}, "enabled": true, "name": "local", "entry_point": "", "runner_type": "local-shell-cmd"}' http://127.0.0.1:9101/v1/actions
+...
+```
+
+As a second example, we can use the same logic to find the function that actually schedules an execution when we run `st2 run`. Just run `st2 --debug core.local date` for a simple, quick example. The output contains several API calls, actually, but the interesting one is the POST to `/v1/executions`. Looking back at our Swagger definition, we see this references the key `st2api.controllers.v1.actionexecutions:action_executions_controller.post`. Follow that to the function `ActionExecutionsController.post()`, and this is where the execution is scheduled. This includes forwarding the request to RabbitMQ so that the `st2actionrunner` processes can receive and honor this request, as well as updating the database as necessary.
+
+> One thing I found very useful and interesting exploring this part of the codebase is the use of models for any data that goes over the message queue, or to the database. All messages are standardized in a model, which is important for re-usability but it also makes it easy to repeatably produce wire formats like JSON when it comes time to actually send a message.
+
+As it is often said, "the devil is in the details", and there's a lot of details to be explored here. There's a lot of code sitting behind statements like "the request is forwarded to the message queue" - often, if you try to actually walk the code down to the request actually being sent, you'll be going down a rabbit hole of parent classes after parent class. However, using the information in this section, you should be able to start with what you see on the CLI, and chase that all the way down to the implementation. The rest is up to you.
+
+
+
+
+
+
