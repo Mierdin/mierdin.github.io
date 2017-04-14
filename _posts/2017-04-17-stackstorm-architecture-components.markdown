@@ -103,6 +103,26 @@ Note the `WORKERS` variable. The two lines where this variable is defined is a b
 
 Other StackStorm components also have their own init system configuration file and can be scaled out similarly.
 
+### Seeing Commands for StackStorm Components
+
+`ps --sort -rss -eo rss,pid,command | head` is useful for outputting the processes using the most memory on the system, and the command that was run to start them. On a typical StackStorm system, these will be mostly StackStorm processes - so you can quickly see at a glance the commands that were run to spin up the various StackStorm components.
+
+```
+vagrant@st2vagrant:~$ ps --sort -rss -eo rss,pid,command | head
+  RSS   PID COMMAND
+83708  8573 /usr/bin/mongod --config /etc/mongod.conf
+82180 14511 /opt/stackstorm/mistral/bin/python /opt/stackstorm/mistral/bin/gunicorn --log-file /var/log/mistral/mistral-api.log -b 127.0.0.1:8989 -w 2 mistral.api.wsgi --graceful-timeout 10
+82148 14514 /opt/stackstorm/mistral/bin/python /opt/stackstorm/mistral/bin/gunicorn --log-file /var/log/mistral/mistral-api.log -b 127.0.0.1:8989 -w 2 mistral.api.wsgi --graceful-timeout 10
+76940  7595 /usr/lib/erlang/erts-5.10.4/bin/beam.smp -W w -K true -A30 -P 1048576 -- -root /usr/lib/erlang -progname erl -- -home /var/lib/rabbitmq -- -pa /usr/lib/rabbitmq/lib/rabbitmq_server-3.2.4/sbin/../ebin -noshell -noinput -s rabbit boot -sname rabbit@st2vagrant -boot start_sasl -kernel inet_default_connect_options [{nodelay,true}] -rabbit tcp_listeners [{"127.0.0.1",5672}] -sasl errlog_type error -sasl sasl_error_logger false -rabbit error_logger {file,"/var/log/rabbitmq/rabbit@st2vagrant.log"} -rabbit sasl_error_logger {file,"/var/log/rabbitmq/rabbit@st2vagrant-sasl.log"} -rabbit enabled_plugins_file "/etc/rabbitmq/enabled_plugins" -rabbit plugins_dir "/usr/lib/rabbitmq/lib/rabbitmq_server-3.2.4/sbin/../plugins" -rabbit plugins_expand_dir "/var/lib/rabbitmq/mnesia/rabbit@st2vagrant-plugins-expand" -os_mon start_cpu_sup false -os_mon start_disksup false -os_mon start_memsup false -mnesia dir "/var/lib/rabbitmq/mnesia/rabbit@st2vagrant"
+75196 14462 /opt/stackstorm/mistral/bin/python /opt/stackstorm/mistral/bin/mistral-server --server engine,executor --config-file /etc/mistral/mistral.conf --log-file /var/log/mistral/mistral-server.log
+64968 12443 /opt/stackstorm/st2/bin/python /opt/stackstorm/st2/bin/gunicorn st2api.wsgi:application -k eventlet -b 127.0.0.1:9101 --workers 1 --threads 1 --graceful-timeout 10 --timeout 30
+63144 11618 /opt/stackstorm/st2/bin/python /opt/stackstorm/st2/bin/gunicorn st2auth.wsgi:application -k eventlet -b 127.0.0.1:9100 --workers 1 --threads 1 --graceful-timeout 10 --timeout 30
+62204 12384 /opt/stackstorm/st2/bin/python /opt/stackstorm/st2/bin/gunicorn st2stream.wsgi:application -k eventlet -b 127.0.0.1:9102 --workers 1 --threads 10 --graceful-timeout 10 --timeout 30
+53836 11541 /opt/stackstorm/st2/bin/python /opt/stackstorm/st2/bin/st2actionrunner --config-file /etc/st2/st2.conf
+```
+
+Tweak the `head` command to see more/less.
+
 ## StackStorm Components
 
 Now, we'll dive in to each component individually. Again, the purpose of this deep-dive is to understand what each component does, but don't lose sight of the end goal, which is that all these components work together to make StackStorm work. Keep the diagram(s) above open in a separate tab if you want, so you can keep the big picture in mind.
@@ -125,30 +145,24 @@ If you've worked with StackStorm at all (and hopefully if you're this far throug
 
 > The upcoming 2.3 release changes a lot of the underlying infrastructure for the StackStorm API. The API itself isn't changing (still at v1) for this release, but the way that the API is described within `st2api`, and how incoming requests are routed to function calls has changed a bit. Everything we'll discuss in this section will reflect these changes.
 
-First, we should talk about the API itself. The API has been defined using an API domain-specific language known as Swagger, which was created to separate the API definitions from the actual implementation in a more-or-less standardized way. This means that any API written in Swagger can take advantage of tooling that can produce generated code, as well as automatic documentation from this definition.
+Before we get into how the the `st2api` component works, it's important to understand the API itself. I wrote a post (Insert reference to separate post on the API itself) that outlines the way that the API is defined as of StackStorm 2.3, and how to figure out exactly what's happening behind the scenes when you run something like `st2 run` from the command-line. Especially if you're interested in contributing to StackStorm, this is a useful post to read.
 
-This Swagger definition is [located here](https://github.com/StackStorm/st2/blob/master/st2common/st2common/openapi.yaml). It plainly defines each API endpoint (like `/api/v1/actions`), what parameters are required by each, what they'll return in the form of a response, etc. While the actual implementation logic that works behind the scenes of each of these endpoints is not shown, it's easy to see at a high level what the API does.
+In short, the API is constructed with Swagger description of all the API endpoints. Using this description each endpoint is linked to its own "implementation function" behind the scenes. These functions may write to a database, they may send a message over the message queue, or they may do both. Whatever's needed in order to implement the functionality offered by that API endpoint.
 
-However, just because the implementation is separated from the definition of the API, this does not mean we can't dig into the implementation when we need to. You may notice the `operationId` key in the Swagger definition. This is the link between the language-agnostic API definition and the actual implementation of that API endpoint. In the case of `st2api`, the key `st2api.controllers.v1.actions:actions_controller.post` literally points to the `ActionsController.post()` function in [`actions.py`](https://github.com/StackStorm/st2/blob/master/st2api/st2api/controllers/v1/actions.py). So, even though the Swagger description is designed to omit any implementation details, it's trivial to find where this implementation is taking place.
+However, the API still has to be served. There still has to be an HTTP server that will accept incoming requests to the API.
 
-When you drill into the implementation, it becomes a little more obvious what's going on. Continuing to pick on the `post` implementation for `/api/v1/actions`, we can see that the primary goal of the function that sits behind this API endpoint is to receive an incoming action definition and write it to the database. Effectively, we're seeing what actually happens on the back-end when we add a new action with the StackStorm CLI:
+> Note that in a production-quality deployment of StackStorm, the API is front-ended by nginx. We'll be talking about the nginx configuration in another section, so we'll not be discussing it here. But it's important to keep this in mind.
+
+We can use the aforementioned handy `ps` command, filtered through `grep` to see exactly what command was used to instantiate the `st2api` process.
 
 ```
-vagrant@st2vagrant:/opt/stackstorm/packs/core/actions$ st2 --debug action create local.yaml
-2017-04-13 22:40:42,012  DEBUG - Using cached token from file "/home/vagrant/.st2/token-st2admin"
-# -------- begin 140451057640144 request ----------
-curl -X POST -H  'Connection: keep-alive' -H  'Accept-Encoding: gzip, deflate' -H  'Accept: */*' -H  'User-Agent: python-requests/2.11.1' -H  'content-type: application/json' -H  'X-Auth-Token: fffffffffffffffff' -H  'Content-Length: 337' --data-binary '{"description": "Action that executes an arbitrary Linux command on the localhost.", "parameters": {"cmd": {"required": true, "type": "string", "description": "Arbitrary Linux command to be executed on the local host."}, "sudo": {"immutable": true}}, "enabled": true, "name": "local", "entry_point": "", "runner_type": "local-shell-cmd"}' http://127.0.0.1:9101/v1/actions
-...
+vagrant@st2vagrant:~$ ps --sort -rss -eo rss,pid,command | head | grep st2api
+64968 12443 /opt/stackstorm/st2/bin/python /opt/stackstorm/st2/bin/gunicorn st2api.wsgi:application -k eventlet -b 127.0.0.1:9101 --workers 1 --threads 1 --graceful-timeout 10 --timeout 30
 ```
 
-As a second example, we can use the same logic to find the function that actually schedules an execution when we run `st2 run`. Just run `st2 --debug core.local date` for a simple, quick example. The output contains several API calls, actually, but the interesting one is the POST to `/v1/executions`. Looking back at our Swagger definition, we see this references the key `st2api.controllers.v1.actionexecutions:action_executions_controller.post`. Follow that to the function `ActionExecutionsController.post()`, and this is where the execution is scheduled. This includes forwarding the request to RabbitMQ so that the `st2actionrunner` processes can receive and honor this request, as well as updating the database as necessary.
+As you can see, it's running on Python, as most StackStorm components run on. Note that this is the distribution of Python in the StackStorm virtualenv, so anything run with this Python binary will already have Python-based dependencies satisfied.
 
-> One thing I found very useful and interesting exploring this part of the codebase is the use of models for any data that goes over the message queue, or to the database. All messages are standardized in a model, which is important for re-usability but it also makes it easy to repeatably produce wire formats like JSON when it comes time to actually send a message.
+The specific application being run on Python is [Gunicorn](http://gunicorn.org/) (note the reference to `/opt/stackstorm/st2/bin/gunicorn`), which is a WSGI HTTP server. it's used to serve not only StackStorm's API, but also some additional components that we'll get into in future sections. You'll notice that for `st2api`, the 3rd positional argument is actually a reference to a Python variable (remember that this is running from StackStorm's Python virtualenv, so this works). Looking at [the code](https://github.com/StackStorm/st2/blob/master/st2api/st2api/wsgi.py) we can see that this variable is the result of a call out to the setup task for the [primary API application](https://github.com/StackStorm/st2/blob/master/st2api/st2api/app.py), which is where the aforementioned swagger spec is loaded and rendered into actionable HTTP endpoints.
 
-As it is often said, "the devil is in the details", and there's a lot of details to be explored here. There's a lot of code sitting behind statements like "the request is forwarded to the message queue" - often, if you try to actually walk the code down to the request actually being sent, you'll be going down a rabbit hole of parent classes after parent class. However, using the information in this section, you should be able to start with what you see on the CLI, and chase that all the way down to the implementation. The rest is up to you.
-
-
-
-
-
+That's about it! `st2api` is actually remarkably simple once you understand how the Swagger spec resolves to actual Python functions (again please read (TODO insert link to post here) for more info on that portion) and how the WSGI server is instantiated.
 
