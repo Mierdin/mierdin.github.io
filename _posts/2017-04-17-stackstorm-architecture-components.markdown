@@ -166,3 +166,117 @@ The specific application being run on Python is [Gunicorn](http://gunicorn.org/)
 
 That's about it! `st2api` is actually remarkably simple once you understand how the Swagger spec resolves to actual Python functions (again please read (TODO insert link to post here) for more info on that portion) and how the WSGI server is instantiated.
 
+
+### Mistral
+
+[Mistral](https://docs.stackstorm.com/mistral.html) is very important because it is StackStorm's primary workflow engine. If you're unfamiliar with [Mistral](https://wiki.openstack.org/wiki/Mistral), it is an OpenStack project for managing workflows. Since Mistral provides a lot of useful workflow primitives, StackStorm integrates with Mistral, and provides plugins to allow Mistral to execute StackStorm actions.
+
+Similar to StackStorm itself, we're not just talking about one component when we're talking about Mistral. Mistral itself is made up of two separate running processes:
+
+- **`mistral-api`** allows 3rd-party systems to execute workflows, get execution status, etc.
+- **`mistral-server`** schedules and runs workflows and tasks
+
+Before looking at how Mistral and StackStorm interoperate, let's spend some time diving into these components, and understanding Mistral's architecture on it's own. [The Mistral Architectural Overview](https://docs.openstack.org/developer/mistral/architecture.html) page is a very useful place to start understanding this. Please review at least this page before continuing, as we'll be referring to certain components later.
+
+If you're just getting started with Mistral and want to explore, you should start looking at the `mistral` tool. This is the primary mechanism for CLI interactions with Mistral, and it's one of the best ways to troubleshoot or just explore how Mistral works. As with many CLI tools, `mistral -h` shows the commands you can run and a description of each. If you're familiar with the StackStorm CLI client `st2`, much of the terminology will be familiar to you.
+
+The focus of this section, however, is StackStorm integrates with Mistral, so let's dive into that. StackStorm treats mistral workflows in a way that is similar to how it treats Python script actions. There's a YAML metadata file, and a "script" file. Where Python actions have a Python script, `mistral` actions refer to a workflow definition, which also happens to be written in YAML.
+
+Because of this, StackStorm ships with a [`mistral-v2` runner](https://github.com/StackStorm/st2/blob/master/contrib/runners/mistral_v2/mistral_v2.py), which is invoked whenever an action refers out to a mistral workflow. Looking at the code, we can see that the runner performs several tasks in order to run Mistral workflows, such as translating between StackStorm-specific resources and Mistral actions, as well as actually sending the workflow to Mistral for processing. This isn't a code-focused post, so we'll leave the rest as an exercise for the reader; however, we'll see some of the effects of these tasks shortly. For now, suffice it to say that this runner should be the first place you look to see how StackStorm and Mistral talk to each other.
+
+> Note that the `mistral-v2` runner is only focused on executing a workflow. The runner returns immediately after successfully sending the workflow to Mistral. So, in order to get visibility into the progress of this workflow, StackStorm needs to constantly poll Mistral for updates on the workflow it invoked. This is done in `st2resultstracker`, and we'll explore this component in greater detail in a future section.
+
+StackStorm maintains a fork of Mistral to ensure that the version in place is stable and integrates well with StackStorm releases. Another important component to understand is . This isn't it's own running process, but it's key to understanding how Mistral is packaged with StackStorm. First, the [`st2mistral` repository](https://github.com/StackStorm/st2mistral) is where we maintain the Mistral plugins necessary for integrating with StackStorm. In addition, the StackStorm fork of Mistral as well as all of the plugins necessary for StackStorm integration are all provided [in the `st2mistral` package](https://github.com/StackStorm/st2-packages/tree/master/packages/st2mistral) (i.e. `deb` or `rpm`).
+
+Let's dive into this integration and explore exactly how Mistral and StackStorm talk to each other. As mentioned previously, the `mistral-v2` runner allows you to reference a Mistral workflow just like you'd reference a Python or shell script in an action metadatafile:
+
+```
+vagrant@st2vagrant:~$ st2 runner get mistral-v2
++-------------------+--------------------------------------------------------------+
+| Property          | Value                                                        |
++-------------------+--------------------------------------------------------------+
+| id                | 58f1283bc4da5f2df72359a3                                     |
+| name              | mistral-v2                                                   |
+| description       | A runner for executing mistral v2 workflow.                  |
+| enabled           | True                                                         |
+| query_module      | mistral_v2                                                   |
+| runner_module     | mistral_v2                                                   |
+...
+```
+
+If you dive into the runner's code, you'll notice it's performing a few preparatory tasks. One of these is the transformation of the actual Mistral workflow file. There's a very specific reason for this, which becomes a bit more evident when you look at the list of actions from Mistral's perspective, and notice that there's only one action for StackStorm:
+
+```
+vagrant@st2vagrant:~$ mistral action-get st2.action
++-------------+--------------------------------------------------------+
+| Field       | Value                                                  |
++-------------+--------------------------------------------------------+
+| ID          | 7bc082cf-41ee-4c60-af0e-1a7c6de1a5ab                   |
+| Name        | st2.action                                             |
+| Is system   | True                                                   |
+| Input       | action_context, ref, parameters=null, st2_context=null |
+| Description | None                                                   |
+| Tags        | <none>                                                 |
+| Created at  | 2017-04-14 19:52:28                                    |
+| Updated at  | None                                                   |
++-------------+--------------------------------------------------------+
+```
+
+This action is one of the Mistral plugins provided in the [`st2mistral`](https://github.com/StackStorm/st2mistral/blob/master/st2mistral/actions/stackstorm.py) repo. It exists because the actions executed within a StackStorm-invoked workflow need to be run within `st2actionrunner`, not within a Mistral executor. So, this mistral action's job is simple: forward execution requests to StackStorm. So, if you write a workflow and run it with StackStorm, you might be using `core.local`, or your own Python action - it doesn't matter. From Mistral's perspective, they're all `st2.action` because the actual work is being done back in StackStorm:
+
+```
+vagrant@st2vagrant:~$ mistral action-execution-list
++--------------------------------------+------------+-----------------+-----------+
+| ID                                   | Name       | Workflow name   | Task name |
++--------------------------------------+------------+-----------------+-----------+
+| 6c00f837-963c-43a8-ab34-43aa50b80e3b | st2.action | testpack.wftest | my_task   |
+| 75268e75-26e6-45e3-aba3-4b6dc0caa675 | st2.action | testpack.wftest | my_task   |
+| 33f9084c-00c6-4569-8dcd-cad3cd979954 | st2.action | testpack.wftest | my_task   |
++--------------------------------------+------------+-----------------+-----------+
+```
+
+> For those curious about how this plugin is "made known" to Mistral, check out the `[entry_points]` section of setup.cfg in [`st2mistral`](https://github.com/StackStorm/st2mistral/blob/master/setup.cfg#L8). StackStorm's packaging process takes care of installing `st2mistral` within Mistral's virtualenv.
+
+So how does this actually work? Well, first let's take a sample workflow - note that we're printing the workflow as it exists in the pack:
+
+
+```
+vagrant@st2vagrant:~$ cat /opt/stackstorm/packs/testpack/actions/workflows/wftest.yaml
+---
+  version: '2.0'
+  testpack.wftest:
+    type: direct
+    tasks:
+      my_task:
+        action: core.local
+        input:
+          cmd: "echo 'HELLO'"
+```
+
+Pretty straightforward - workflow that runs a single task that uses `core.local` to print "HELLO" to stdout. However, we can use the `mistral workflow-get-definition` command to see the workflow definition that Mistral received from our `mistral-v2` runner upon execution:
+
+```
+vagrant@st2vagrant:~$ mistral workflow-get-definition testpack.wftest
+testpack.wftest:
+  tasks:
+    my_task:
+      action: st2.action
+      input:
+        parameters:
+          cmd: echo 'HELLO'
+        ref: core.local
+  type: direct
+version: '2.0'
+```
+
+Note that the action name `core.local` we previously used has been moved to the `ref` field, and is now `st2.action`. Again, this is because the only action that Mistral recognizes for StackStorm is `st2.action`. This translation is one of the preparatory tasks that the `mistral-v2` runner performs on the workflow before sending it to Mistral. If you look at the [`mistral-v2` runner](https://github.com/StackStorm/st2/blob/master/contrib/runners/mistral_v2/mistral_v2.py), and follow the code down, you can find [a function that performs this translation](https://github.com/StackStorm/st2/blob/master/st2common/st2common/util/workflow/mistral.py), which the runner uses when sending a workflow definition to Mistral.
+
+If you look at the output of `mistral action-get st2.action` as shown above, you can see that this action accepts a parameter of `ref`, which is the StackStorm action that actually needs to be executed. As a result, Mistral is happy because the translated workflow references an action that it knows about, and StackStorm is happy becuase this Mistral action is sending the parameters it needs to execute the `core.local` action.
+
+So, to summarize, here's the order of operations when you invoke a Mistral workflow with StackStorm:
+
+1. StackStorm invokes the `mistral-v2` runner. This performs prep tasks on workflow, like translating StackStorm references to something Mistral knows about, then sends result to Mistral for execution. The runner returns immediately after confirming the workflow has been sent to Mistral.
+2. Mistral receives new workflow execution, and starts executing tasks in workflow. Any tasks that run in StackStorm (probably most/all of them) will use `st2.action` action.
+3. The `st2.action` action will use StackStorm's execution API to run actions referenced in workflow
+
+In short, StackStorm passes the workflow to Mistral, which passes individual actions back to StackStorm for execution. In this way, Mistral really is just used for the workflow orchestration, and StackStorm retains control of actually executing the referenced actions.
