@@ -4,7 +4,7 @@ title: Keeping It Classless
 # Need to make sure you're using all the options in this config file that you want to
 # avatar:
 
-description: Perspectives On The Intersection of Networking and Software Development
+description: Perspectives On Networks, Automation, Systems, and Software Engineering
 baseurl: "" # the subpath of your site, e.g. /blog/
 host: keepingitclassless.net
 url: "http://keepingitclassless.net/" # the base hostname & protocol for your site
@@ -12,7 +12,7 @@ permalink: /:year/:month/:title/
 twitter_username: mierdin
 github_username:  mierdin
 
-highlighter: pygments
+highlighter: rouge
 # Build settings
 markdown: kramdown
 
@@ -53,7 +53,7 @@ author:
     or <a href="https://www.linkedin.com/in/oswaltmatt" target="_blank">LinkedIN</a>.
 
 rss_path: feed/
-categories_path: categories.html
-tags_path: tags.html
+categories_path: categories/
+tags_path: tags/
 
 BASE_PATH:

@@ -70,6 +70,6 @@ These six constraints are:
 
 Again, the point of all of this is to maximize the usefulness of an API to provide services to a large number and variety of clients, which in the case of SDN is likely to be our business logic applications or cloud orchestration (like OpenStack).
 
-When the rubber meets the road, a REST API can be no more than a simple web server that accepts HTTP POSTs, GETs, etc. Usually there's something inside these requests like [XML](http://www.w3schools.com/xml/), [JSON](http://www.json.org/), [SOAP](http://www.w3schools.com/soap/default.asp), or others, but that part isn't as important, since these are all open standards that are well understood at this point.
+When the rubber meets the road, a REST API can be no more than a simple web server that accepts HTTP POSTs, GETs, etc. Usually there's something inside these requests like [XML](http://www.w3schools.com/xml/), [JSON](http://www.json.org/), [SOAP](https://www.w3schools.com/xml/xml_soap.asp), or others, but that part isn't as important, since these are all open standards that are well understood at this point.
 
 I hope I clarified REST for you and added some insight into what it means for tomorrow's SDN builders.
