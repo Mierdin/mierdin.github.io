@@ -40,7 +40,9 @@ As you can see, there's not really a "StackStorm server". StackStorm is actually
 
 ## StackStorm Services
 
-Now, we'll dive in to each service individually. Again, the purpose of this post is to explore each service individually to better understand them, but remember that they must all work together to make StackStorm work. It may be useful to keep the diagram(s) above open in a separate tab, to keep the big picture in mind.
+Now, we'll dive in to each service individually. Note that each service runs as its own separate process, and nearly all of them can have multiple running copies of themselves on the same machine, or even multiple machines. Refer to the [StackStorm High-Availability Deployment Guide](https://docs.stackstorm.com/reference/ha.html) for more details on this.
+
+Again, the purpose of this post is to explore each service individually to better understand them, but remember that they must all work together to make StackStorm work. It may be useful to keep the diagram(s) above open in a separate tab, to keep the big picture in mind.
 
 We'll be looking at things from a systems perspective as well as a bit of the code, where it makes sense. My primary motivation for this post is to document the "gist" of how each service is implemented, to give you a head start on understanding them if you wish to either know how they work, or contribute to them. Selfishly, I'd love it if such a reference existed for my own benefit, so I'm writing it.
 
@@ -98,7 +100,7 @@ For an engaging primer on rules engines in general, I'd advise listening to [Sof
 
 Remember my earlier post on [StackStorm concepts](https://keepingitclassless.net/2016/12/introduction-to-stackstorm/)? In it, I briefly touched on Triggers - these are definitions of an "event" that may by actionable. For instance, when someone posts a tweet that matches a search we've configured, the Twitter sensor may use the `twitter.matched_tweet` trigger to notify us of that event. A specific instance of that trigger being raised is known creatively as a "trigger instance".
 
-In short, StackStorm's rules engine looks for incoming trigger instances, and decides if an Action needs to be executed. It makes this decision based on the rules that are currently installed and enabled from the various packs on the system.
+In short, StackStorm's rules engine looks for incoming trigger instances, and decides if an Action needs to be executed. It makes this decision based on the rules that are currently installed and enabled from the various packs that are currently present in the database.
 
 As is common with most other StackStorm services, the logic of this service is contained within a ["worker"](https://github.com/StackStorm/st2/blob/master/st2reactor/st2reactor/rules/worker.py), using a handy Python base class which centralizes the receipt of messages from the message queue, and allows the rules engine to focus on just dealing with incoming trigger instances.
 
@@ -124,11 +126,11 @@ Upon start, `st2rulesengine` threads off [a bit of code](https://github.com/Stac
 
 If you've worked with StackStorm at all (and since you're still reading, I'll assume you have), you know that StackStorm has an API. External components, such as the CLI client, the Web UI, as well as third-party systems all use this API to interact with StackStorm.
 
-`st2api`, like the aforementioned `st2actionrunner` runs as it's own separate process. To put it very loosely, `st2api` "translates" API calls into RabbitMQ messages and database interactions. What's meant by this is that incoming API requests are usually aimed at either retrieving data, pushing new data, or executing some kind of action with StackStorm. All of these things are done on other running processes; for instance, `st2actionrunner` is responsible for actually executing a running action, and it receives those requests over RabbitMQ. So, `st2api` must initially receive such instructions via it's API, and forward that request along via RabbitMQ. Let's discuss how that actually works.
+An interesting and roughly accurate way of viewing `st2api` is that it "translates" incoming API calls into RabbitMQ messages and database interactions. What's meant by this is that incoming API requests are usually aimed at either retrieving data, pushing new data, or executing some kind of action with StackStorm. All of these things are done on other running processes; for instance, `st2actionrunner` is responsible for actually executing a running action, and it receives those requests over RabbitMQ. So, `st2api` must initially receive such instructions via it's API, and forward that request along via RabbitMQ. Let's discuss how that actually works.
 
 > The 2.3 release changed a lot of the underlying infrastructure for the StackStorm API. The API itself isn't changing (still at v1) for this release, but the way that the API is described within `st2api`, and how incoming requests are routed to function calls has changed a bit. Everything we'll discuss in this section will reflect these changes. Pleaes review [this issue](https://github.com/StackStorm/st2/issues/2686) and [this PR](https://github.com/StackStorm/st2/pull/2727) for a bit of insight into the history of this change.
 
-The way the API itself actually works requires its own blog post for a proper exploration. For now, suffice it to say that StackStorm's API is defined with the [OpenAPI specification](https://github.com/StackStorm/st2/blob/master/st2common/st2common/openapi.yaml). Using this definition, each endpoint is linked to its own "implementation function" behind the scenes. These functions may write to a database, they may send a message over the message queue, or they may do both. Whatever's needed in order to implement the functionality offered by that API endpoint is performed within that function.
+The way the API itself actually works requires its own blog post for a proper exploration. For now, suffice it to say that StackStorm's API is defined with the [OpenAPI specification](https://github.com/StackStorm/st2/blob/master/st2common/st2common/openapi.yaml). Using this definition, each endpoint is linked to an API controller function that actually provides the implementation for this endpoint. These functions may write to a database, they may send a message over the message queue, or they may do both. Whatever's needed in order to implement the functionality offered by that API endpoint is performed within that function.
 
 For the purposes of this post however, let's talk briefly about how this API is actually served from a systems perspective. Obviously, regardless of how the API is implemented, it will have to be served by some kind of HTTP server.
 
@@ -148,8 +150,6 @@ The second argument - `/opt/stackstorm/st2/bin/gunicorn` - shows that [Gunicorn]
 
 You may also be wondering how `st2api` serves [webhooks](https://docs.stackstorm.com/webhooks.html). There's an endpoint for webhooks at `/webhooks` of course, but how does `st2api` know that a rule has registered a new webhook? This is actually not that different from what we saw earlier with Sensors, when the sensor container is made aware of a new sensor being registered. In this case, `st2api` leverages a [TriggerWatcher](https://github.com/StackStorm/st2/blob/master/st2common/st2common/services/triggerwatcher.py) class which is made aware of new triggers being referenced from rules, and calls the appropriate event handler functions in the `st2api` controller. Those functions add or remove webhook entries from the `HooksHolder` instance, so whenever a new request comes in to the `/webhooks` endpoint, `st2api` knows to check this `HooksHolder` for the appropriate trigger to dispatch.
 
-Obviously there's a lot more to talk about regarding how the API is actually implemented, but that's for another post. For now, this is how `st2api` works at a systems level.
-
 ### st2auth
 
 Take a look at StackStorm's [API definition](https://github.com/StackStorm/st2/blob/master/st2common/st2common/openapi.yaml) and search for "st2auth" and you can see that the authentication endpoints are defined alongside the rest of the API.
@@ -162,9 +162,9 @@ Take a look at StackStorm's [API definition](https://github.com/StackStorm/st2/b
 /opt/stackstorm/st2/bin/python /opt/stackstorm/st2/bin/gunicorn st2auth.wsgi:application -k eventlet -b 127.0.0.1:9100 --workers 1 --threads 1 --graceful-timeout 10 --timeout 30
 ```
 
-`st2api` [defines its own](https://github.com/StackStorm/st2/blob/master/st2auth/st2auth/app.py) WSGI application to run under Gunicorn.
+`st2api` defines [its own WSGI application](https://github.com/StackStorm/st2/blob/master/st2auth/st2auth/app.py) to run under Gunicorn.
 
-> If you're like me, you might have looked at the [OpenAPI definition](https://github.com/StackStorm/st2/blob/master/st2common/st2common/openapi.yaml) and noticed that `st2api`'s endpoints are mixed in with the regular API endpoints. At the time of this writing, the two are separated when the spec is loaded by either component by none other than...regular expressions! If you look at [`st2api`'s app definition](https://github.com/StackStorm/st2/blob/master/st2auth/st2auth/app.py), you'll notice a few transformations are passed to the `router.add_spec` function. Among other things, these are used within the `add_spec` to determine which endpoints to associate with this application.
+> If you're like me, you might have looked at the [OpenAPI definition](https://github.com/StackStorm/st2/blob/master/st2common/st2common/openapi.yaml) and noticed that `st2api`'s endpoints are mixed in with the regular API endpoints. At the time of this writing, the two are kept separate when the spec is loaded by either component by none other than...regular expressions! If you look at [`st2api`'s app definition](https://github.com/StackStorm/st2/blob/master/st2auth/st2auth/app.py), you'll notice a few transformations are passed to the `router.add_spec` function. Among other things, these are used within the `add_spec` to determine which endpoints to associate with this application.
 
 The [API controller](https://github.com/StackStorm/st2/blob/master/st2auth/st2auth/controllers/v1/auth.py) for `st2api` is relatively simple, and provides implementations for the two endpoints:
 
@@ -181,16 +181,16 @@ Due to the available options for running [Workflows](https://docs.stackstorm.com
 
 The end-goal here is to provide the results of a Workflow execution in StackStorm, rather than forcing users to go somewhere else for that information.
 
-`st2resultstracker` runs as its own standalone process. When a workflow is executed, it consumes a message from a special queue (note the `get_tracker` function in [resultstracker.py](https://github.com/StackStorm/st2/blob/master/st2actions/st2actions/resultstracker/resultstracker.py)). That message follows a [database model](https://github.com/StackStorm/st2/blob/master/st2common/st2common/models/db/executionstate.py) focused on tracking execution state, and contains the parameter `query_module`. If the execution is a Mistral workflow, this will be set to `mistral_v2`, which causes `st2resultstracker` to load the [mistral-specific querier](https://github.com/StackStorm/st2/blob/master/contrib/runners/mistral_v2/query/mistral_v2.py). That querier contains all of the code necessary for interacting with Mistral. `st2resultstracker` uses this module to query Mistral and place the results in the StackStorm database.
+`st2resultstracker` runs as its own standalone process. When a workflow is executed, it consumes a message from a special queue (note the `get_tracker` function in [resultstracker.py](https://github.com/StackStorm/st2/blob/master/st2actions/st2actions/resultstracker/resultstracker.py)). That message follows a [database model](https://github.com/StackStorm/st2/blob/master/st2common/st2common/models/db/executionstate.py) focused on tracking execution state, and contains the parameter `query_module`. If the execution is a Mistral workflow, this will be set to `mistral_v2`, which causes `st2resultstracker` to load the [mistral-specific querier](https://github.com/StackStorm/st2/blob/master/contrib/runners/mistral_v2/query/mistral_v2.py). That querier contains all of the code necessary for interacting with Mistral to receive results information. `st2resultstracker` uses this module to query Mistral and place the results in the StackStorm database.
 
 ### st2notifier
 
-The primary role of `st2notifier` is to provide an integration point for [notifying](https://docs.stackstorm.com/chatops/notifications.html) external systems that an action has completed. Chatops is a big use case for this, but there are others.
+The primary role of `st2notifier` is to provide an integration point for [notifying](https://docs.stackstorm.com/chatops/notifications.html) external systems that an action has completed. [Chatops](https://docs.stackstorm.com/chatops/chatops.html) is a big use case for this, but there are others.
 
-Two purposes:
+At the time of this writing, `st2notifier` serves two main purposes:
 
-- Generate `st2.core.actiontrigger` and `st2.core.notifytrigger` based on the completion of ActionExecution. 
-- act as a backup scheduler for actions that may not have been scheduled.
+- Generate `st2.core.actiontrigger` and `st2.core.notifytrigger` triggers based on the completion and runtime parameters of an Action execution. 
+- Act as a backup scheduler for actions that may not have been scheduled - i.e., delayed by policy.
 
 `st2notifier` dispatches two types of triggers. The first, `st2.core.actiontrigger` is fired for each completed execution. This is enabled by default, so you can hit the ground running by writing a rule to consume this trigger and notify external systems like Slack or JIRA when an action is completed. The second trigger, `st2.core.notifytrigger` is more action-specific. As mentioned in the [Notification](https://docs.stackstorm.com/chatops/notifications.html) documentation, you can add a `notify` section to your Action metadata. If this section is present, `st2notifier` will also dispatch a `notifytrigger` for each route specified in the `notify` section. You can consume these triggers with rules and publish according to the routing information inside that section.
 
@@ -201,6 +201,8 @@ If you look at the [notifier implementation](https://github.com/StackStorm/st2/b
 ### st2garbagecollector
 
 `st2garbagecollector` is a relatively simple service aimed at providing garbage collection services for things like action executions and trigger-instances. For some high-activity deployments of StackStorm, it may be useful to delete executions after a certain amount of time, rather than continue to keep them around forever, eating up system resources.
+
+> NOTE that this is "garbage collection" in the StackStorm sense, not at the language level (Python).
 
 Garbage collection is optional, and not enabled by default. You can enable this in the `garbagecollector` section of the [StackStorm config](https://github.com/StackStorm/st2/blob/master/conf/st2.conf.sample).
 
